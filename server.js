@@ -49,7 +49,7 @@ const creds = z.object({ email: z.string().email().max(200).transform(s=>s.toLow
 app.post('/api/signup', authLimit, async (req, res) => {
   const inv = typeof req.body?.invite === 'string' ? req.body.invite : '', OWNER = process.env.OWNER_INVITE_CODE || '';
   const owner = OWNER.length >= 16 && inv.length === OWNER.length && crypto.timingSafeEqual(Buffer.from(inv), Buffer.from(OWNER));
-  const p = creds.extend({ notUS: owner ? z.any() : z.literal(true), invite: z.string().max(200).optional() }).safeParse(req.body);
+  const p = creds.extend({ notUS: owner ? z.boolean().optional() : z.literal(true), invite: z.string().max(200).optional() }).safeParse(req.body);
   if (!p.success) return bad(res, 'Valid email, 10+ char password, and non-US confirmation required');
   if (!owner && (req.get('cf-ipcountry') === 'US' || req.get('x-vercel-ip-country') === 'US')) return res.status(451).json({ error: 'Not available in the US' });
   try { const r = db.prepare('INSERT INTO users(email,pw,not_us,created) VALUES(?,?,1,?)').run(p.data.email, await bcrypt.hash(p.data.password, 12), Date.now());
