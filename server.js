@@ -49,12 +49,14 @@ const creds = z.object({ email: z.string().email().max(200).transform(s=>s.toLow
 app.post('/api/signup', authLimit, async (req, res) => {
   const inv = typeof req.body?.invite === 'string' ? req.body.invite : '', OWNER = process.env.OWNER_INVITE_CODE || '';
   const owner = OWNER.length >= 16 && inv.length === OWNER.length && crypto.timingSafeEqual(Buffer.from(inv), Buffer.from(OWNER));
-  const p = creds.extend({ notUS: owner ? z.boolean().optional() : z.literal(true), invite: z.string().max(200).optional() }).safeParse(req.body);
-  if (!p.success) return bad(res, 'Valid email, 10+ char password, and non-US confirmation required');
-  if (!owner && (req.get('cf-ipcountry') === 'US' || req.get('x-vercel-ip-country') === 'US')) return res.status(451).json({ error: 'Not available in the US' });
+  if (inv && !owner) return bad(res, 'That invite code is not valid. Remove it or check the link.');
+  const p = creds.extend({ notUS: z.boolean().optional(), invite: z.string().max(200).optional() }).safeParse(req.body);
+  if (!p.success) { const f = p.error.issues[0]?.path?.[0]; return bad(res, f === 'email' ? 'Enter a valid email address.' : f === 'password' ? 'Password must be at least 10 characters.' : 'Check your details and try again.'); }
+  if (!owner && p.data.notUS !== true) return bad(res, 'Please confirm you are not a US person to continue.');
+  if (!owner && (req.get('cf-ipcountry') === 'US' || req.get('x-vercel-ip-country') === 'US')) return res.status(451).json({ error: 'Sorry, StockChain is not available in the US.' });
   try { const r = db.prepare('INSERT INTO users(email,pw,not_us,created) VALUES(?,?,1,?)').run(p.data.email, await bcrypt.hash(p.data.password, 12), Date.now());
     res.json({ csrf: newSession(res, Number(r.lastInsertRowid)) });
-  } catch { bad(res, 'Could not create account'); }
+  } catch { bad(res, 'An account with that email may already exist. Try logging in.'); }
 });
 app.post('/api/login', authLimit, async (req, res) => {
   const p = creds.safeParse(req.body); if (!p.success) return bad(res, 'Invalid email or password');

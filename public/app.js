@@ -5,7 +5,7 @@ const cls = n => n >= 0 ? 'up' : 'dn';
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 async function api(path, body) {
   const r = await fetch('/api/' + path, body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf }, body: JSON.stringify(body) } : {});
-  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Request failed'); return j;
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || (r.status === 429 ? 'Too many attempts. Wait a few minutes and try again.' : 'Request failed (' + r.status + '). Please try again.')); return j;
 }
 function show(v) { document.querySelectorAll('.view').forEach(e => e.hidden = e.id !== 'v-' + v); $('#nav').hidden = !me; window.scrollTo(0, 0); }
 const COLORS = ['#7c5cff', '#22c55e', '#f59e0b', '#06b6d4', '#ef4444', '#ec4899', '#84cc16', '#a78bfa', '#14b8a6', '#f97316', '#64748b'];
@@ -22,15 +22,25 @@ async function route() {
 }
 function renderTicker() { $('#ticker').innerHTML = tokens.slice(0, 8).map(t => `<div class="tk"><b>${esc(t.symbol)}</b> ${fmt(t.price)} <span class="${cls(t.change24h)}">${pct(t.change24h)}</span></div>`).join(''); }
 
-const invite = () => new URLSearchParams(location.search).get('invite');
+(() => { const i = new URLSearchParams(location.search).get('invite'); if (i) { sessionStorage.setItem('invite', i); history.replaceState(null, '', location.pathname + location.hash); } })();
+const invite = () => sessionStorage.getItem('invite');
 function authView(mode) {
   const su = mode === 'signup'; show('auth');
-  $('#auth-title').textContent = su ? 'Create your account' : 'Welcome back'; $('#auth-btn').textContent = su ? 'Sign up' : 'Log in';
+  $('#auth-title').textContent = su ? 'Create your account' : 'Welcome back'; $('#auth-btn').textContent = su ? 'Create account' : 'Log in'; $('#auth-err').textContent = '';
   $('#us-row').hidden = !su || !!invite(); $('#auth-switch').innerHTML = su ? 'Have an account? <a href="#login">Log in</a>' : 'New here? <a href="#signup">Create an account</a>';
+  $('#auth-form').noValidate = true;
   $('#auth-form').onsubmit = async e => {
-    e.preventDefault(); const f = new FormData(e.target); $('#auth-err').textContent = '';
-    try { const r = await api(su ? 'signup' : 'login', { email: f.get('email'), password: f.get('password'), ...(su ? { notUS: f.get('notUS') === 'on', ...(invite() ? { invite: invite() } : {}) } : {}) });
-      csrf = r.csrf; me = null; location.hash = '#dash'; route(); } catch (err) { $('#auth-err').textContent = err.message; }
+    e.preventDefault(); const f = new FormData(e.target), btn = $('#auth-btn'), err = $('#auth-err');
+    const fail = m => { err.textContent = m; err.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+    err.textContent = ''; const email = String(f.get('email') || '').trim(), password = String(f.get('password') || '');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return fail('Enter a valid email address.');
+    if (su && password.length < 10) return fail('Password must be at least 10 characters.');
+    if (su && !invite() && f.get('notUS') !== 'on') return fail('Please tick the box to confirm you are not a US person.');
+    const label = btn.textContent; btn.disabled = true; btn.textContent = su ? 'Creating account…' : 'Logging in…';
+    try { const r = await api(su ? 'signup' : 'login', { email, password, ...(su ? { notUS: f.get('notUS') === 'on', ...(invite() ? { invite: invite() } : {}) } : {}) });
+      csrf = r.csrf; me = null; sessionStorage.removeItem('invite'); location.hash = '#dash'; route();
+    } catch (x) { if (/invite/i.test(x.message)) { sessionStorage.removeItem('invite'); $('#us-row').hidden = false; } fail(x.message || 'Something went wrong. Please try again.'); }
+    finally { btn.disabled = false; btn.textContent = label; }
   };
 }
 $('#logout').onclick = async () => { await api('logout', {}).catch(() => {}); me = null; location.hash = ''; route(); };
