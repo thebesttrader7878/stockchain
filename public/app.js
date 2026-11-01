@@ -14,7 +14,7 @@ async function route() {
   const [h, q] = location.hash.slice(1).split('?'); const params = new URLSearchParams(q || '');
   if (!me) { try { me = await api('me'); csrf = me.csrf; } catch { me = null; } }
   if (!tokens.length) tokens = await api('tokens').catch(() => []);
-  if (!me) { if (h === 'signup' || h === 'login') return authView(h); renderTicker(); return show('landing'); }
+  if (!me) { if (invite() && !h) return authView('signup'); if (h === 'signup' || h === 'login') return authView(h); renderTicker(); return show('landing'); }
   if (!me.wallet) return show('connect');
   if (h === 'markets') return markets();
   if (h === 'swap') return swapView(params);
@@ -22,13 +22,14 @@ async function route() {
 }
 function renderTicker() { $('#ticker').innerHTML = tokens.slice(0, 8).map(t => `<div class="tk"><b>${esc(t.symbol)}</b> ${fmt(t.price)} <span class="${cls(t.change24h)}">${pct(t.change24h)}</span></div>`).join(''); }
 
+const invite = () => new URLSearchParams(location.search).get('invite');
 function authView(mode) {
   const su = mode === 'signup'; show('auth');
   $('#auth-title').textContent = su ? 'Create your account' : 'Welcome back'; $('#auth-btn').textContent = su ? 'Sign up' : 'Log in';
-  $('#us-row').hidden = !su; $('#auth-switch').innerHTML = su ? 'Have an account? <a href="#login">Log in</a>' : 'New here? <a href="#signup">Create an account</a>';
+  $('#us-row').hidden = !su || !!invite(); $('#auth-switch').innerHTML = su ? 'Have an account? <a href="#login">Log in</a>' : 'New here? <a href="#signup">Create an account</a>';
   $('#auth-form').onsubmit = async e => {
     e.preventDefault(); const f = new FormData(e.target); $('#auth-err').textContent = '';
-    try { const r = await api(su ? 'signup' : 'login', { email: f.get('email'), password: f.get('password'), ...(su ? { notUS: f.get('notUS') === 'on' } : {}) });
+    try { const r = await api(su ? 'signup' : 'login', { email: f.get('email'), password: f.get('password'), ...(su ? { notUS: f.get('notUS') === 'on', ...(invite() ? { invite: invite() } : {}) } : {}) });
       csrf = r.csrf; me = null; location.hash = '#dash'; route(); } catch (err) { $('#auth-err').textContent = err.message; }
   };
 }

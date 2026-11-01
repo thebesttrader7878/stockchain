@@ -1,13 +1,19 @@
 import express from 'express'; import helmet from 'helmet'; import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser'; import bcrypt from 'bcryptjs'; import { z } from 'zod';
 import nacl from 'tweetnacl'; import bs58 from 'bs58'; import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite'; import { createRequire } from 'node:module'; const { PublicKey } = createRequire(import.meta.url)('@solana/web3.js');
+import { DatabaseSync } from 'node:sqlite'; import { createRequire } from 'node:module'; const { PublicKey, Connection, TransactionInstruction, TransactionMessage, VersionedTransaction } = createRequire(import.meta.url)('@solana/web3.js');
 import { USDC, STOCKS, BY_MINT } from './tokens.js';
 
 const PORT = process.env.PORT || 3000, PROD = process.env.NODE_ENV === 'production';
 const FEE_WALLET = process.env.FEE_WALLET || ''; // Seven must set this
 const FEE_BPS = 100; const RPC = process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com';
-const JUP = 'https://lite-api.jup.ag';
+const JUP = process.env.JUP_API_KEY ? 'https://api.jup.ag' : 'https://lite-api.jup.ag'; // free lite tier is rate limited
+const JH = process.env.JUP_API_KEY ? { 'x-api-key': process.env.JUP_API_KEY } : {};
+async function jfetch(url, opt = {}) { for (let t = 0; ; t++) { // retry 429s and transient errors with backoff
+  const r = await fetch(url, { ...opt, headers: { ...(opt.headers||{}), ...JH } }); const j = await r.json().catch(() => ({}));
+  if (r.ok && !j.error) return j;
+  if (t >= 4 || (r.status < 500 && r.status !== 429)) throw new Error(r.status === 429 ? 'Price service busy, try again' : (j.error || 'Swap service error'));
+  await new Promise(s => setTimeout(s, 400 * 2 ** t)); } }
 const db = new DatabaseSync(process.env.DB_PATH || './data.db');
 db.exec(`PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, pw TEXT NOT NULL, wallet TEXT UNIQUE, not_us INTEGER NOT NULL, created INTEGER NOT NULL);
@@ -41,9 +47,11 @@ const bad = (res, e) => res.status(400).json({ error: e });
 const creds = z.object({ email: z.string().email().max(200).transform(s=>s.toLowerCase().trim()), password: z.string().min(10).max(200) });
 
 app.post('/api/signup', authLimit, async (req, res) => {
-  const p = creds.extend({ notUS: z.literal(true) }).safeParse(req.body);
+  const inv = typeof req.body?.invite === 'string' ? req.body.invite : '', OWNER = process.env.OWNER_INVITE_CODE || '';
+  const owner = OWNER.length >= 16 && inv.length === OWNER.length && crypto.timingSafeEqual(Buffer.from(inv), Buffer.from(OWNER));
+  const p = creds.extend({ notUS: owner ? z.any() : z.literal(true), invite: z.string().max(200).optional() }).safeParse(req.body);
   if (!p.success) return bad(res, 'Valid email, 10+ char password, and non-US confirmation required');
-  if (req.get('cf-ipcountry') === 'US' || req.get('x-vercel-ip-country') === 'US') return res.status(451).json({ error: 'Not available in the US' });
+  if (!owner && (req.get('cf-ipcountry') === 'US' || req.get('x-vercel-ip-country') === 'US')) return res.status(451).json({ error: 'Not available in the US' });
   try { const r = db.prepare('INSERT INTO users(email,pw,not_us,created) VALUES(?,?,1,?)').run(p.data.email, await bcrypt.hash(p.data.password, 12), Date.now());
     res.json({ csrf: newSession(res, Number(r.lastInsertRowid)) });
   } catch { bad(res, 'Could not create account'); }
@@ -79,7 +87,7 @@ app.post('/api/wallet/verify', auth, (req, res) => {
 let priceCache = { t:0, d:{} };
 async function prices() {
   if (Date.now() - priceCache.t < 15_000) return priceCache.d;
-  const r = await fetch(`${JUP}/price/v3?ids=${[USDC,...STOCKS].map(t=>t.mint).join(',')}`); const j = await r.json();
+  const j = await jfetch(`${JUP}/price/v3?ids=${[USDC,...STOCKS].map(t=>t.mint).join(',')}`);
   priceCache = { t: Date.now(), d: j }; return j;
 }
 app.get('/api/tokens', async (req, res) => {
@@ -118,28 +126,46 @@ app.post('/api/watchlist', auth, (req, res) => {
 const swapIn = z.object({ symbol: z.string().refine(s=>STOCKS.some(t=>t.symbol===s)), side: z.enum(['buy','sell']), amount: z.number().positive().max(1e7), slippageBps: z.number().int().min(10).max(500).default(100) });
 function legs(d) { const t = STOCKS.find(x=>x.symbol===d.symbol); const [i,o] = d.side==='buy' ? [USDC,t] : [t,USDC];
   return { t, i, o, raw: BigInt(Math.floor(d.amount * 10**i.decimals)) }; }
-function feeAccountFor(mintTok) { // ATA of FEE_WALLET for the fee mint (output mint, Jupiter ExactIn default)
-  const [ata] = PublicKey.findProgramAddressSync([new PublicKey(FEE_WALLET).toBytes(), new PublicKey(mintTok.program).toBytes(), new PublicKey(mintTok.mint).toBytes()], new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'));
-  return ata.toBase58(); }
+function ataOf(owner, tok) { return PublicKey.findProgramAddressSync([new PublicKey(owner).toBytes(), new PublicKey(tok.program).toBytes(), new PublicKey(tok.mint).toBytes()], new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'))[0].toBase58(); }
+// All fees are taken in USDC. Sells: Jupiter platform fee on the USDC output.
+// Buys: 1% of the USDC input is split off and sent to the fee wallet's USDC account in the same transaction; the rest is swapped.
 async function quote(d) { const { i, o, raw } = legs(d);
-  const u = `${JUP}/swap/v1/quote?inputMint=${i.mint}&outputMint=${o.mint}&amount=${raw}&slippageBps=${d.slippageBps}&platformFeeBps=${FEE_BPS}`;
-  const r = await fetch(u); const j = await r.json(); if (!r.ok || j.error) throw new Error(j.error || 'No route'); return j; }
+  const buy = d.side === 'buy', fee = buy ? raw * BigInt(FEE_BPS) / 10000n : 0n, amt = raw - fee;
+  const u = `${JUP}/swap/v1/quote?inputMint=${i.mint}&outputMint=${o.mint}&amount=${amt}&slippageBps=${d.slippageBps}` + (buy ? '' : `&platformFeeBps=${FEE_BPS}`);
+  const j = await jfetch(u);
+  return { q: j, feeRaw: buy ? fee : BigInt(j.platformFee?.amount || 0) }; }
 app.post('/api/quote', auth, async (req, res) => {
   const p = swapIn.safeParse(req.body); if (!p.success) return bad(res, 'Bad swap input');
-  try { const q = await quote(p.data); const { o } = legs(p.data);
-    res.json({ outAmount: Number(q.outAmount)/10**o.decimals, minOut: Number(q.otherAmountThreshold)/10**o.decimals, fee: Number(q.platformFee?.amount||0)/10**o.decimals, feeBps: q.platformFee?.feeBps, feeSymbol: o.symbol, priceImpactPct: Number(q.priceImpactPct), quote: q });
+  try { const { q, feeRaw } = await quote(p.data); const { o } = legs(p.data);
+    res.json({ outAmount: Number(q.outAmount)/10**o.decimals, minOut: Number(q.otherAmountThreshold)/10**o.decimals, fee: Number(feeRaw)/1e6, feeBps: FEE_BPS, feeSymbol: 'USDC', priceImpactPct: Number(q.priceImpactPct) });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
+const conn = new Connection(RPC, 'confirmed');
+const ix = x => new TransactionInstruction({ programId: new PublicKey(x.programId), keys: x.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })), data: Buffer.from(x.data, 'base64') });
+function usdcFeeTransfer(owner, amount) { // SPL TransferChecked user USDC ATA -> fee wallet USDC ATA
+  const data = Buffer.alloc(10); data[0] = 12; data.writeBigUInt64LE(amount, 1); data[9] = USDC.decimals;
+  return new TransactionInstruction({ programId: new PublicKey(USDC.program), data, keys: [
+    { pubkey: new PublicKey(ataOf(owner, USDC)), isSigner:false, isWritable:true }, { pubkey: new PublicKey(USDC.mint), isSigner:false, isWritable:false },
+    { pubkey: new PublicKey(ataOf(FEE_WALLET, USDC)), isSigner:false, isWritable:true }, { pubkey: new PublicKey(owner), isSigner:true, isWritable:false } ] }); }
 app.post('/api/swap', auth, async (req, res) => {
   if (!req.user.wallet) return bad(res, 'Link a wallet first');
   if (!FEE_WALLET) return res.status(503).json({ error: 'Trading is not enabled yet (fee wallet not configured)' });
   const p = swapIn.safeParse(req.body); if (!p.success) return bad(res, 'Bad swap input');
-  try { const q = await quote(p.data); const { o } = legs(p.data); // re-quote server side so client can't strip the fee
-    const r = await fetch(`${JUP}/swap/v1/swap`, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ quoteResponse:q, userPublicKey:req.user.wallet, feeAccount: feeAccountFor(o), dynamicComputeUnitLimit:true, prioritizationFeeLamports:'auto' }) });
-    const j = await r.json(); if (!r.ok || !j.swapTransaction) throw new Error(j.error || 'Swap build failed');
-    res.json({ tx: j.swapTransaction, lastValidBlockHeight: j.lastValidBlockHeight });
+  try { const { q, feeRaw } = await quote(p.data); // re-quote server side so the client can't strip the fee
+    const base = { quoteResponse:q, userPublicKey:req.user.wallet, dynamicComputeUnitLimit:true, prioritizationFeeLamports:'auto' };
+    if (p.data.side === 'sell') {
+      const j = await jpost('/swap/v1/swap', { ...base, feeAccount: ataOf(FEE_WALLET, USDC) });
+      return res.json({ tx: j.swapTransaction, lastValidBlockHeight: j.lastValidBlockHeight });
+    }
+    const j = await jpost('/swap/v1/swap-instructions', base);
+    const alts = (await Promise.all((j.addressLookupTableAddresses||[]).map(a => conn.getAddressLookupTable(new PublicKey(a))))).map(r => r.value).filter(Boolean);
+    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
+    const ixs = [...(j.computeBudgetInstructions||[]).map(ix), usdcFeeTransfer(req.user.wallet, feeRaw), ...(j.setupInstructions||[]).map(ix), ix(j.swapInstruction), ...(j.cleanupInstruction ? [ix(j.cleanupInstruction)] : [])];
+    const msg = new TransactionMessage({ payerKey: new PublicKey(req.user.wallet), recentBlockhash: blockhash, instructions: ixs }).compileToV0Message(alts);
+    res.json({ tx: Buffer.from(new VersionedTransaction(msg).serialize()).toString('base64'), lastValidBlockHeight });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
+const jpost = (path, body) => jfetch(JUP + path, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
 app.post('/api/swaps/record', auth, async (req, res) => {
   const p = z.object({ sig: z.string().min(60).max(100), symbol: z.string(), side: z.enum(['buy','sell']), inAmt: z.number(), outAmt: z.number() }).safeParse(req.body);
   if (!p.success || !STOCKS.some(t=>t.symbol===p.data.symbol)) return bad(res, 'Bad record');
