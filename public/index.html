@@ -1,0 +1,47 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>StockChain: own real stocks on Solana</title><link rel="stylesheet" href="/style.css"></head><body>
+<header class="top"><div class="brand">◆ StockChain</div><nav id="nav" hidden><a href="#dash">Portfolio</a><a href="#markets">Markets</a><a href="#swap">Trade</a><button id="logout" class="link">Log out</button></nav></header>
+<main>
+<section id="v-landing" class="view">
+  <div class="hero"><span class="pill">Tokenized stocks · 24/7 · self-custody</span>
+  <h1>Grow your stock portfolio <em>on-chain</em></h1>
+  <p class="sub">Buy Apple, Tesla, NVIDIA and the S&amp;P 500 as xStocks with USDC. Your keys, your tokens, trade any time.</p>
+  <div id="ticker" class="ticker"></div>
+  <a class="btn big" href="#signup">Create free account</a><a class="btn ghost" href="#login">I have an account</a>
+  <ul class="perks"><li>🔐 Non-custodial: we never touch your keys</li><li>⚡ Best price routing by Jupiter</li><li>💸 Simple flat 1% fee, shown before you trade</li></ul></div>
+</section>
+<section id="v-auth" class="view card narrow" hidden>
+  <h2 id="auth-title">Create your account</h2>
+  <form id="auth-form"><label>Email<input name="email" type="email" required autocomplete="email"></label>
+  <label>Password<input name="password" type="password" minlength="10" required autocomplete="new-password"></label>
+  <label class="check" id="us-row"><input type="checkbox" name="notUS"> I confirm I am not a US person and not located in the US, and I accept the Terms.</label>
+  <button class="btn big" type="submit" id="auth-btn">Sign up</button><p class="err" id="auth-err"></p></form>
+  <p class="muted" id="auth-switch"></p>
+</section>
+<section id="v-connect" class="view card narrow" hidden>
+  <h2>Link your Phantom wallet</h2><p class="muted">You'll sign a free message to prove you own the wallet. No funds move.</p>
+  <button class="btn big" id="connect">Connect Phantom</button><p class="err" id="connect-err"></p>
+  <p class="muted small">No Phantom? <a href="https://phantom.app/download" target="_blank" rel="noopener">Get it here</a>.</p>
+</section>
+<section id="v-dash" class="view" hidden>
+  <div class="card total"><div class="muted small">Portfolio value</div><div class="big-num" id="d-total">$0.00</div>
+    <div class="row"><span id="d-24h" class="chip"></span><span id="d-all" class="chip"></span></div>
+    <div class="row qa"><a class="btn" href="#swap?side=buy">Buy</a><a class="btn ghost" href="#swap?side=sell">Sell</a></div>
+    <div class="muted small" id="d-wallet"></div></div>
+  <div class="card"><h3>Allocation</h3><div class="alloc"><div id="d-donut" class="donut"></div><ul id="d-legend" class="legend"></ul></div></div>
+  <div class="card"><h3>Holdings</h3><ul id="d-hold" class="list"></ul></div>
+  <div class="card"><h3>Watchlist</h3><ul id="d-watch" class="list"></ul></div>
+  <div class="card"><h3>Recent trades <span class="muted small" id="d-fees"></span></h3><ul id="d-tx" class="list"></ul></div>
+  <p class="err" id="d-err"></p>
+</section>
+<section id="v-markets" class="view" hidden><h2>Markets</h2><ul id="m-list" class="list card"></ul></section>
+<section id="v-swap" class="view card narrow" hidden>
+  <div class="seg"><button data-side="buy" class="on">Buy</button><button data-side="sell">Sell</button></div>
+  <label>Stock<select id="s-sym"></select></label>
+  <label><span id="s-in-lbl">You pay (USDC)</span><input id="s-amt" type="number" inputmode="decimal" min="0" step="any" placeholder="0.00"></label>
+  <div class="quote" id="s-quote"><span class="muted">Enter an amount to get a live quote</span></div>
+  <button class="btn big" id="s-go" disabled>Review &amp; sign in Phantom</button><p class="err" id="s-err"></p>
+</section>
+</main>
+<footer class="foot">Not available to US persons. xStocks are tracker certificates issued by third parties, not shares, and are not offered in the US. Trading involves risk. Not investment advice. A 1% platform fee applies to every buy and sell.</footer>
+<script src="/vendor/web3.js"></script><script src="/app.js"></script></body></html>
